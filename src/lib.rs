@@ -6,8 +6,8 @@ use http::{
     Request, StatusCode,
 };
 use hyper::{Body, Server};
-use std::convert::TryFrom;
 use std::net::{SocketAddr, TcpListener};
+use std::{convert::TryFrom, time::Duration};
 use tower::make::Shared;
 use tower_service::Service;
 
@@ -17,7 +17,7 @@ pub struct TestClient {
 }
 
 impl TestClient {
-    pub fn new<S, ResBody>(svc: S) -> Self
+    pub async fn new<S, ResBody>(svc: S) -> Self
     where
         S: Service<Request<Body>, Response = http::Response<ResBody>> + Clone + Send + 'static,
         ResBody: HttpBody + Send + 'static,
@@ -40,7 +40,9 @@ impl TestClient {
             .build()
             .unwrap();
 
-        TestClient { client, addr }
+        let test_client = TestClient { client, addr };
+        test_client.wait_until_server_started().await;
+        test_client
     }
 
     #[allow(dead_code)]
@@ -84,6 +86,16 @@ impl TestClient {
             builder: self.client.delete(format!("http://{}{}", self.addr, url)),
         }
     }
+
+    async fn wait_until_server_started(&self) {
+        loop {
+            let res = self.get("/").send().await;
+            if res.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -93,10 +105,10 @@ pub struct RequestBuilder {
 
 impl RequestBuilder {
     #[allow(dead_code)]
-    pub async fn send(self) -> TestResponse {
-        TestResponse {
-            response: self.builder.send().await.unwrap(),
-        }
+    pub async fn send(self) -> Result<TestResponse, reqwest::Error> {
+        Ok(TestResponse {
+            response: self.builder.send().await?,
+        })
     }
 
     #[allow(dead_code)]
@@ -140,21 +152,21 @@ pub struct TestResponse {
 
 impl TestResponse {
     #[allow(dead_code)]
-    pub async fn text(self) -> String {
-        self.response.text().await.unwrap()
-    }
-    
-    #[allow(dead_code)]
-    pub async fn bytes(self) -> Bytes {
-        self.response.bytes().await.unwrap()
+    pub async fn text(self) -> Result<String, reqwest::Error> {
+        self.response.text().await
     }
 
     #[allow(dead_code)]
-    pub async fn json<T>(self) -> T
+    pub async fn bytes(self) -> Result<Bytes, reqwest::Error> {
+        self.response.bytes().await
+    }
+
+    #[allow(dead_code)]
+    pub async fn json<T>(self) -> Result<T, reqwest::Error>
     where
         T: serde::de::DeserializeOwned,
     {
-        self.response.json().await.unwrap()
+        self.response.json().await
     }
 
     #[allow(dead_code)]
@@ -168,14 +180,22 @@ impl TestResponse {
     }
 
     #[allow(dead_code)]
-    pub async fn chunk(&mut self) -> Option<Bytes> {
-        self.response.chunk().await.unwrap()
+    pub async fn chunk(&mut self) -> Result<Option<Bytes>, reqwest::Error> {
+        self.response.chunk().await
     }
 
     #[allow(dead_code)]
-    pub async fn chunk_text(&mut self) -> Option<String> {
+    pub async fn chunk_text(&mut self) -> Result<Option<String>, reqwest::Error> {
         let chunk = self.chunk().await?;
-        Some(String::from_utf8(chunk.to_vec()).unwrap())
+        if let Some(chunk) = chunk {
+            let chunk = String::from_utf8(chunk.to_vec());
+            match chunk {
+                Ok(chunk) => return Ok(Some(chunk)),
+                Err(_) => return Ok(Option::None),
+            }
+        } else {
+            Ok(Option::None)
+        }
     }
 }
 
@@ -188,8 +208,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_request() {
         let app = Router::new().route("/", get(|| async {}));
-        let client = super::TestClient::new(app);
-        let res = client.get("/").send().await;
+        let client = super::TestClient::new(app).await;
+        let res = client.get("/").send().await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
     }
 }
