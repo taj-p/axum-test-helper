@@ -1,47 +1,47 @@
-/// this is a hard copy from TestClient at axum
-use axum::{body::HttpBody, BoxError};
 use bytes::Bytes;
 use http::{
     header::{HeaderName, HeaderValue},
-    Request, StatusCode,
+    StatusCode,
 };
-use hyper::{Body, Server};
-use std::net::{SocketAddr, TcpListener};
+use std::net::{IpAddr, SocketAddr};
 use std::{convert::TryFrom, time::Duration};
-use tower::make::Shared;
-use tower_service::Service;
 
+#[derive(Debug)]
 pub struct TestClient {
     client: reqwest::Client,
     addr: SocketAddr,
 }
 
 impl TestClient {
-    pub async fn new<S, ResBody>(svc: S) -> Self
-    where
-        S: Service<Request<Body>, Response = http::Response<ResBody>> + Clone + Send + 'static,
-        ResBody: HttpBody + Send + 'static,
-        ResBody::Data: Send,
-        ResBody::Error: Into<BoxError>,
-        S::Future: Send,
-        S::Error: Into<BoxError>,
-    {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("Could not bind ephemeral socket");
-        let addr = listener.local_addr().unwrap();
-        println!("Listening on {}", addr);
+    pub async fn new(svc: axum::Router) -> Self {
+        let free_port = port_check::free_local_port().unwrap();
+        let ip = "0.0.0.0".parse::<IpAddr>().unwrap();
+        let socket = SocketAddr::new(ip, free_port);
+
+        let svc = svc.clone();
 
         tokio::spawn(async move {
-            let server = Server::from_tcp(listener).unwrap().serve(Shared::new(svc));
-            server.await.expect("server error");
+            axum::Server::bind(&socket)
+                .serve(svc.into_make_service())
+                .await
         });
+
+        println!("TestClient Router listening on {}", socket);
 
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap();
 
-        let test_client = TestClient { client, addr };
+        let test_client = TestClient {
+            client,
+            addr: socket,
+        };
+
+        // It takes time for `Axum` to spin up our `Router`. Let's wait until
+        // we can at least get some form of response from the server.
         test_client.wait_until_server_started().await;
+
         test_client
     }
 
@@ -89,11 +89,11 @@ impl TestClient {
 
     async fn wait_until_server_started(&self) {
         loop {
-            let res = self.get("/").send().await;
+            let res = self.get("/auth/signin").send().await;
             if res.is_ok() {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
