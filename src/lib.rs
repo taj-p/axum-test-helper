@@ -22,7 +22,7 @@ impl TestClient {
 
         tokio::spawn(async move {
             axum::Server::bind(&socket)
-                .serve(svc.into_make_service())
+                .serve(svc.into_make_service_with_connect_info::<SocketAddr>())
                 .await
         });
 
